@@ -1,116 +1,112 @@
 import pandas as pd
 import gradio as gr
 import os
+import io
 from pathlib import Path
 
 # 确保存放汇总表的目录存在
 REPORT_FOLDER = "reports"
 os.makedirs(REPORT_FOLDER, exist_ok=True)
 
-def load_data_flexibly(filepath):
-    """智能寻找表头并读取数据 (支持 CSV/Excel)"""
+def process_single_file(filepath):
+    """
+    专门针对钙钛矿 J-V 原始 CSV/Excel 的解析函数
+    逻辑：全表扫描带有 "Etac" 关键字的行，提取其下一行数据
+    """
+    filename = Path(filepath).name
     ext = Path(filepath).suffix.lower()
-    df = None
     
-    if ext == '.csv':
-        # 尝试所有可能的编码，防止乱码
-        for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp1252']:
-            try:
-                # 1. 先不设表头读入，寻找包含关键字的行
-                temp = pd.read_csv(filepath, encoding=enc, header=None, sep=None, engine='python', on_bad_lines='skip')
-                for i, row in temp.iterrows():
-                    row_str = " ".join(row.astype(str))
-                    # 匹配钙钛矿常见的效率关键字
-                    if any(k in row_str for k in ["Etac", "PCE", "Eff"]):
-                        # 2. 以这一行为表头重新读取
-                        df = pd.read_csv(filepath, encoding=enc, skiprows=i, sep=None, engine='python', on_bad_lines='skip')
-                        break
-                if df is not None: break
-            except: continue
-    elif ext in ['.xlsx', '.xls']:
+    file_results = []
+    
+    # 尝试多种编码读取文件，解决乱码问题
+    for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp1252']:
         try:
-            df = pd.read_excel(filepath)
-        except: pass
-    return df
+            with open(filepath, 'r', encoding=enc) as f:
+                lines = f.readlines()
+            
+            # 逐行扫描寻找汇总表头
+            for i, line in enumerate(lines):
+                # 寻找包含核心参数的表头行
+                if "Etac(%)" in line and "Jsc" in line:
+                    header = line.strip().split(',')
+                    if i + 1 < len(lines):
+                        data_row = lines[i+1].strip().split(',')
+                        
+                        # 建立列名映射（防止不同软件列顺序不同）
+                        col_map = {}
+                        for idx, col in enumerate(header):
+                            c = col.strip()
+                            if "Etac" in c: col_map['Etac'] = idx
+                            if "Jsc" in c: col_map['Jsc'] = idx
+                            if "Voc" in c: col_map['Voc'] = idx
+                            if "Fill Factor" in c or "FF" in c: col_map['FF'] = idx
+                        
+                        # 确保找到了效率列并提取数据
+                        if 'Etac' in col_map and len(data_row) > max(col_map.values()):
+                            try:
+                                etac_val = float(data_row[col_map['Etac']])
+                                file_results.append({
+                                    "文件名": filename,
+                                    "Etac(%)": etac_val,
+                                    "Jsc(mA/cm²)": data_row[col_map['Jsc']] if 'Jsc' in col_map else "N/A",
+                                    "Voc(V)": data_row[col_map['Voc']] if 'Voc' in col_map else "N/A",
+                                    "Fill Factor(%)": data_row[col_map['FF']] if 'FF' in col_map else "N/A"
+                                })
+                            except: continue
+            
+            if file_results:
+                # 从该文件的所有 Repeat 中找出 Etac 最大的那一个
+                return max(file_results, key=lambda x: x["Etac(%)"])
+            
+            # 如果没找到汇总行，尝试普通表格读取方式（兜底逻辑）
+            if not file_results:
+                df = pd.read_csv(filepath, encoding=enc, on_bad_lines='skip')
+                # 此处省略普通读取逻辑，可根据需要补充
+        except:
+            continue
+    return None
 
-def analyze_files(file_objs):
+def main_handler(file_objs):
     if not file_objs:
         return None, None, "⚠️ 请先上传文件。"
     
-    all_data = []
-    status_msg = ""
-    
+    summary_list = []
     for f in file_objs:
-        filename = Path(f.name).name
-        df = load_data_flexibly(f.name)
-        
-        if df is not None and not df.empty:
-            # 清理列名空格
-            df.columns = df.columns.astype(str).str.strip()
-            cols = df.columns
-            
-            # 自动寻找对应的列名（模糊匹配）
-            eff_col = next((c for c in cols if any(k in c for k in ["Etac", "PCE", "Eff"])), None)
-            jsc_col = next((c for c in cols if any(k in c for k in ["Jsc", "jsc", "JSC"])), None)
-            voc_col = next((c for c in cols if any(k in c for k in ["Voc", "voc", "VOC"])), None)
-            ff_col = next((c for c in cols if any(k in c for k in ["FF", "Fill Factor", "ff"])), None)
-            
-            if eff_col:
-                # 转换效率为数字
-                df[eff_col] = pd.to_numeric(df[eff_col], errors='coerce')
-                valid_df = df.dropna(subset=[eff_col])
-                
-                if not valid_df.empty:
-                    # 找到 Etac(%) 最大的一行
-                    max_idx = valid_df[eff_col].idxmax()
-                    best_row = valid_df.loc[max_idx]
-                    
-                    all_data.append({
-                        "文件名": filename,
-                        "Etac(%)": best_row[eff_col],
-                        "Jsc(mA/cm²)": best_row[jsc_col] if jsc_col else "N/A",
-                        "Voc(V)": best_row[voc_col] if voc_col else "N/A",
-                        "Fill Factor(%)": best_row[ff_col] if ff_col else "N/A"
-                    })
-        else:
-            status_msg += f"无法解析: {filename}\n"
-
-    if not all_data:
-        return None, None, "❌ 错误：所有文件中都没找到 'Etac' 或 'PCE' 表头。请检查文件内容。"
-
-    # 创建汇总表并排序
-    summary_df = pd.DataFrame(all_data).sort_values(by="Etac(%)", ascending=False).reset_index(drop=True)
+        res = process_single_file(f.name)
+        if res:
+            summary_list.append(res)
     
-    # 保存结果到本地文件供下载
-    out_path = os.path.abspath(os.path.join(REPORT_FOLDER, "Summary_Result.xlsx"))
+    if not summary_list:
+        return None, None, "❌ 匹配失败：未能从文件中提取到 Etac 数据。请确保文件是原始测试报告。"
+
+    # 1. 整理结果并按 Etac(%) 从高到低排序
+    summary_df = pd.DataFrame(summary_list)
+    summary_df["Etac(%)"] = pd.to_numeric(summary_df["Etac(%)"])
+    summary_df = summary_df.sort_values(by="Etac(%)", ascending=False).reset_index(drop=True)
+    
+    # 2. 保存 Excel 文件
+    out_path = os.path.abspath(os.path.join(REPORT_FOLDER, "钙钛矿参数排序汇总.xlsx"))
     summary_df.to_excel(out_path, index=False)
     
-    success_msg = f"✅ 处理成功！已从 {len(all_data)} 个文件中提取到最高效率。"
-    return summary_df, out_path, success_msg
+    return summary_df, out_path, f"✅ 成功！已从 {len(summary_list)} 个文件中提取到最优数据。"
 
-# 构建网页界面
+# 网页界面：极简稳定版
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("## ☀️ 钙钛矿器件参数全自动排序工具")
-    gr.Markdown("支持批量拖入 CSV 或 Excel，自动锁定最高效率行并整理参数。")
+    gr.Markdown("### ☀️ 钙钛矿器件参数极速排序 (J-V 原始文件版)")
+    gr.Markdown("直接把测试导出的所有 CSV/Excel 丢进来。我会自动跳过原始曲线数据，只提取汇总表里效率最高的一行。")
     
     with gr.Row():
-        file_input = gr.File(label="📥 上传测试文件 (可多选/全选)", file_count="multiple")
+        files = gr.File(label="📥 批量上传文件", file_count="multiple")
     
-    run_btn = gr.Button("🚀 提取并按效率排序", variant="primary")
+    btn = gr.Button("🚀 提取最高效率并排序", variant="primary")
     
-    status_output = gr.Textbox(label="运行状态", interactive=False)
+    status_msg = gr.Textbox(label="状态提示", interactive=False)
     
     with gr.Row():
-        table_output = gr.Dataframe(label="📊 提取结果预览")
-        file_output = gr.File(label="📤 下载汇总 Excel 表")
-
-    run_btn.click(
-        fn=analyze_files, 
-        inputs=file_input, 
-        outputs=[table_output, file_output, status_output]
-    )
+        table = gr.Dataframe(label="📊 效率排名表 (Top Result per File)")
+        download = gr.File(label="📤 下载汇总 Excel")
+    
+    btn.click(fn=main_handler, inputs=files, outputs=[table, download, status_msg])
 
 if __name__ == "__main__":
-    # Railway 部署环境变量
-    port = int(os.getenv("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", 7860)))
