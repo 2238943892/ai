@@ -3,6 +3,10 @@ import gradio as gr
 import tempfile
 import os
 from pathlib import Path
+import matplotlib
+
+# 🚨 必加（解决服务器画图崩溃）
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # ====== 列名适配 ======
@@ -147,4 +151,8 @@ with gr.Blocks() as demo:
         outputs=[output_table, output_plot, output_file, output_text]
     )
 
-demo.launch()
+# 🚨 Railway 必备启动方式
+demo.launch(
+    server_name="0.0.0.0",
+    server_port=int(os.environ.get("PORT", 7860))
+)
