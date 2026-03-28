@@ -1,4 +1,1 @@
 gradio==4.44.0
-pandas
-matplotlib
-openpyxl
