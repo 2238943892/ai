@@ -6,7 +6,7 @@ import gradio as gr
 from pathlib import Path
 from datetime import datetime
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment, get_column_letter
+from openpyxl.styles import Font, PatternFill, Alignment
 
 # ── 配置 ──────────────────────────────────────────────
 REPORT_FOLDER = "./reports"
